@@ -1,0 +1,215 @@
+name: 编译 OpenWrt (官方原版)
+
+on:
+  push:
+    branches: [ master ]
+  repository_dispatch:
+  workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: main
+  CONFIG_FILE: .config
+  DIY1_SH: diy1.sh
+  DIY2_SH: diy2.sh
+  FEEDS_CONF: feeds.conf.default
+  TZ: Asia/Shanghai
+  OPENWRT_NAME: "openwrt"
+  UPLOAD_RELEASE: true
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    name: 编译任务
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: 释放系统最大可用空间
+        run: |
+          echo "=== 释放前磁盘空间 ==="
+          df -h
+          sudo apt-get clean
+          docker system prune -af || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android \
+            /usr/local/lib/node_modules /opt/hostedtoolcache /usr/local/.ghcup /usr/local/.cargo \
+            /usr/local/lib/python3.* /usr/local/aws-sam-cli /usr/local/aws-cli /usr/local/julia* \
+            /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/share/kotlinc /opt/microsoft \
+            /opt/google /var/lib/gems /opt/pipx /opt/amazon 2>/dev/null || true
+          echo "=== 释放后磁盘空间 ==="
+          df -h
+
+      - name: 检出仓库代码
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 设置当前的日期
+        run: |
+          sudo timedatectl set-timezone "$TZ"
+          echo "date1=$(date +'%Y.%m.%d-%H.%M')" >> $GITHUB_ENV
+          echo "date2=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "date3=$(date '+%Y年%m月%d日')" >> $GITHUB_ENV
+          echo "✅ 日期设置完成"
+
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential asciidoc binutils bzip2 gawk gettext git \
+            libncurses5-dev libz-dev patch python3 unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 \
+            subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev \
+            texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool \
+            autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync
+          df -h
+
+      - name: 克隆 OpenWrt 源码
+        run: |
+          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+          echo "✅ 源码克隆完成"
+
+      - name: 执行 diy1.sh（首次自定义）
+        run: |
+          cd openwrt
+          [ -f "../$FEEDS_CONF" ] && cp "../$FEEDS_CONF" ./
+          [ -f "../$DIY1_SH" ] && chmod +x "../$DIY1_SH" && "../$DIY1_SH"
+          echo "✅ diy1.sh 执行完成"
+
+      - name: 更新 feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          echo "✅ feeds 更新完成"
+
+      - name: 执行 diy2.sh（再次自定义）
+        run: |
+          cd openwrt
+          [ -f "../$DIY2_SH" ] && chmod +x "../$DIY2_SH" && "../$DIY2_SH"
+          echo "✅ diy2.sh 执行完成"
+
+      - name: 加载配置并执行 defconfig
+        run: |
+          [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
+          cd openwrt
+          make defconfig
+          echo "✅ defconfig 执行完成"
+
+      # ============================================
+      # 缓存步骤（优化版）
+      # ============================================
+      - name: 缓存 dl、staging_dir、build_dir
+        id: cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            openwrt/dl
+            openwrt/staging_dir
+            openwrt/build_dir
+          key: openwrt-x86-64-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+          restore-keys: |
+            openwrt-x86-64-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+            openwrt-x86-64-
+            openwrt-
+
+      - name: 显示缓存状态
+        run: |
+          if [ "${{ steps.cache.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ 缓存命中！编译将显著加速"
+          else
+            echo "⚠️ 缓存未命中，将进行完整编译"
+          fi
+
+      - name: 下载源码包（增强重试）
+        run: |
+          cd openwrt
+          echo "=== 开始下载源码包 ==="
+          # 增强重试机制
+          make download -j8 V=s || make download -j4 V=s || make download -j1 V=s || make download -j1 V=s
+          echo "=== 检查空文件 ==="
+          find dl -size -1024c -exec ls -l {} \;
+          echo "=== 删除空文件并重试 ==="
+          find dl -size -1024c -exec rm -f {} \;
+          make download -j1 V=s 2>/dev/null || true
+          echo "✅ 源码包下载完成"
+
+      - name: 编译前检查与清理
+        run: |
+          cd openwrt
+          echo "=== 编译前磁盘空间 ==="
+          df -h .
+          echo "=== 清理临时文件 ==="
+          rm -rf tmp 2>/dev/null || true
+          rm -rf bin/packages 2>/dev/null || true
+          df -h .
+
+      - name: 编译固件
+        id: compile
+        run: |
+          cd openwrt
+          echo -e "=== 开始编译，使用 $(nproc) 线程 ==="
+          
+          # 执行编译
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          
+          # 检查编译产物是否存在
+          if [ -d "bin/targets/x86/64" ] && [ -n "$(ls -A bin/targets/x86/64/*.bin 2>/dev/null)" ]; then
+            echo "✅ 固件编译成功"
+            ls -la bin/targets/x86/64/*.bin
+          else
+            echo "❌ 固件文件不存在，编译可能失败"
+            echo "=== 检查 bin 目录内容 ==="
+            find bin -name "*.bin" 2>/dev/null || echo "未找到 .bin 文件"
+            exit 1
+          fi
+          
+          # 手动执行后期步骤（容错处理）
+          echo "=== 执行后期处理步骤 ==="
+          make package/index V=s 2>/dev/null || echo "⚠️ package/index 失败，忽略"
+          make json_overview_image_info V=s 2>/dev/null || echo "⚠️ json_overview_image_info 失败，忽略"
+          make checksum V=s 2>/dev/null || echo "⚠️ checksum 失败，忽略"
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          
+          # 提取设备名称
+          grep '^CONFIG_TARGET_.*_DEVICE_.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_ENV
+          [ ! -s DEVICE_NAME ] && echo "DEVICE_NAME=generic" >> $GITHUB_ENV
+          echo "✅ 设备名称: ${{ env.DEVICE_NAME }}"
+
+      - name: 检查磁盘使用情况
+        if: (!cancelled())
+        run: |
+          echo "=== 编译后磁盘空间 ==="
+          df -h
+          echo "=== openwrt 目录大小 ==="
+          du -sh openwrt 2>/dev/null || true
+          echo "=== openwrt/bin 目录大小 ==="
+          du -sh openwrt/bin 2>/dev/null || true
+
+      - name: 整理固件文件
+        id: organize
+        if: steps.compile.outcome == 'success'
+        run: |
+          mkdir -p firmware
+          
+          # 复制配置文件
+          cp -v ./openwrt/.config firmware/${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}.config
+          
+          # 查找并复制固件文件
+          echo "=== 查找固件文件 ==="
+          find openwrt/bin/targets/*/*/ -maxdepth 1 -type f \
+            \( -name "config.buildinfo" \
+            -o -name "*squashfs-combined*" \
+            -o -name "*sysupgrade*" \
+            -o -name "*.bin" \
+            -o -name "*.img.gz" \
+            -o -name "*.vmdk" \
+            -o -name "*.vdi" \
+            -o -name "*.vhdx" \
+            -o -name "*.qcow2" \) \
+            -exec cp -v {} firmware
