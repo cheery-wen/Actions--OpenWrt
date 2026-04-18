@@ -5,6 +5,19 @@ on:
     branches: [ master ]
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      target:
+        description: '目标架构 (留空使用默认 x86_64)'
+        required: false
+        default: 'x86_64'
+      upload_release:
+        description: '是否上传到 Release (true/false)'
+        required: false
+        default: 'true'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
@@ -15,10 +28,12 @@ env:
   FEEDS_CONF: feeds.conf.default
   TZ: Asia/Shanghai
   OPENWRT_NAME: "openwrt"
-  UPLOAD_RELEASE: true
+  UPLOAD_RELEASE: ${{ github.event.inputs.upload_release || 'true' }}
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   build:
@@ -64,8 +79,18 @@ jobs:
             libncurses5-dev libz-dev patch python3 unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 \
             subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev \
             texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool \
-            autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync
+            autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync ccache
           df -h
+
+      - name: 缓存 ccache
+        id: cache-ccache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ runner.os }}-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+            ccache-
 
       - name: 克隆 OpenWrt 源码
         run: |
@@ -96,12 +121,10 @@ jobs:
         run: |
           [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
           cd openwrt
+          echo "CONFIG_CCACHE=y" >> .config
           make defconfig
           echo "✅ defconfig 执行完成"
 
-      # ============================================
-      # 缓存步骤（优化版）
-      # ============================================
       - name: 缓存 dl、staging_dir、build_dir
         id: cache
         uses: actions/cache@v5
@@ -110,25 +133,28 @@ jobs:
             openwrt/dl
             openwrt/staging_dir
             openwrt/build_dir
-          key: openwrt-x86-64-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+          key: openwrt-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
           restore-keys: |
-            openwrt-x86-64-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
-            openwrt-x86-64-
+            openwrt-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
             openwrt-
 
       - name: 显示缓存状态
         run: |
           if [ "${{ steps.cache.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ 缓存命中！编译将显著加速"
+            echo "✅ 编译缓存命中！"
           else
-            echo "⚠️ 缓存未命中，将进行完整编译"
+            echo "⚠️ 编译缓存未命中"
+          fi
+          if [ "${{ steps.cache-ccache.outputs.cache-hit }}" == "true" ]; then
+            echo "✅ ccache 缓存命中！"
+          else
+            echo "⚠️ ccache 缓存未命中"
           fi
 
       - name: 下载源码包（增强重试）
         run: |
           cd openwrt
           echo "=== 开始下载源码包 ==="
-          # 增强重试机制
           make download -j8 V=s || make download -j4 V=s || make download -j1 V=s || make download -j1 V=s
           echo "=== 检查空文件 ==="
           find dl -size -1024c -exec ls -l {} \;
@@ -151,44 +177,50 @@ jobs:
         id: compile
         run: |
           cd openwrt
-          echo -e "=== 开始编译，使用 $(nproc) 线程 ==="
           
-          # 执行编译
-          make -j$(nproc) || make -j1 || make -j1 V=s
-          
-          # 检查编译产物是否存在
-          if [ -d "bin/targets/x86/64" ] && [ -n "$(ls -A bin/targets/x86/64/*.bin 2>/dev/null)" ]; then
-            echo "✅ 固件编译成功"
-            ls -la bin/targets/x86/64/*.bin
+          MEM_GB=$(free -g | awk '/^Mem:/{print $2}')
+          if [ $MEM_GB -lt 8 ]; then
+            JOBS=2
+          elif [ $MEM_GB -lt 16 ]; then
+            JOBS=4
           else
-            echo "❌ 固件文件不存在，编译可能失败"
-            echo "=== 检查 bin 目录内容 ==="
-            find bin -name "*.bin" 2>/dev/null || echo "未找到 .bin 文件"
+            JOBS=$(nproc)
+          fi
+          echo "=== 系统内存 ${MEM_GB}GB，使用 ${JOBS} 线程编译 ==="
+          
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export PATH="/usr/lib/ccache:$PATH"
+          
+          make -j$JOBS || make -j1 || make -j1 V=s
+          
+          BIN_DIR=$(find bin/targets -type f -name "*.bin" -printf '%h\n' 2>/dev/null | head -1)
+          if [ -n "$BIN_DIR" ] && [ -n "$(ls -A "$BIN_DIR"/*.bin 2>/dev/null)" ]; then
+            echo "✅ 固件编译成功，位于 $BIN_DIR"
+            ls -la "$BIN_DIR"/*.bin
+          else
+            echo "❌ 未找到 .bin 固件文件"
             exit 1
           fi
           
-          # 手动执行后期步骤（容错处理）
-          echo "=== 执行后期处理步骤 ==="
-          make package/index V=s 2>/dev/null || echo "⚠️ package/index 失败，忽略"
-          make json_overview_image_info V=s 2>/dev/null || echo "⚠️ json_overview_image_info 失败，忽略"
-          make checksum V=s 2>/dev/null || echo "⚠️ checksum 失败，忽略"
+          make package/index V=s 2>/dev/null || echo "⚠️ package/index 失败"
+          make json_overview_image_info V=s 2>/dev/null || echo "⚠️ json_overview_image_info 失败"
+          make checksum V=s 2>/dev/null || echo "⚠️ checksum 失败"
           
           echo "status=success" >> $GITHUB_OUTPUT
           
-          # 提取设备名称
           grep '^CONFIG_TARGET_.*_DEVICE_.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_ENV
           [ ! -s DEVICE_NAME ] && echo "DEVICE_NAME=generic" >> $GITHUB_ENV
-          echo "✅ 设备名称: ${{ env.DEVICE_NAME }}"
+          echo "✅ 设备名称: $(cat DEVICE_NAME 2>/dev/null || echo generic)"
+          
+          ccache -s
 
       - name: 检查磁盘使用情况
         if: (!cancelled())
         run: |
           echo "=== 编译后磁盘空间 ==="
           df -h
-          echo "=== openwrt 目录大小 ==="
           du -sh openwrt 2>/dev/null || true
-          echo "=== openwrt/bin 目录大小 ==="
           du -sh openwrt/bin 2>/dev/null || true
 
       - name: 整理固件文件
@@ -196,12 +228,10 @@ jobs:
         if: steps.compile.outcome == 'success'
         run: |
           mkdir -p firmware
-          
-          # 复制配置文件
           cp -v ./openwrt/.config firmware/${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}.config
           
-          # 查找并复制固件文件
           echo "=== 查找固件文件 ==="
+          # 修正：使用 -t 参数配合 + 结束符，避免 YAML 转义问题
           find openwrt/bin/targets/*/*/ -maxdepth 1 -type f \
             \( -name "config.buildinfo" \
             -o -name "*squashfs-combined*" \
@@ -212,4 +242,125 @@ jobs:
             -o -name "*.vdi" \
             -o -name "*.vhdx" \
             -o -name "*.qcow2" \) \
-            -exec cp -v {} firmware
+            -exec cp -v -t firmware/ {} + 2>/dev/null || true
+          
+          cd firmware
+          
+          echo "=== 重命名固件文件 ==="
+          for f in *; do
+            if [ -f "$f" ]; then
+              if [[ "$f" == "config.buildinfo" ]]; then
+                mv "$f" "${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_$f" 2>/dev/null || true
+              elif [[ "$f" == *"squashfs-combined"* ]] || [[ "$f" == *".bin" ]] || [[ "$f" == *".img.gz" ]]; then
+                mv "$f" "${{ env.date1 }}_${{ env.OPENWRT_NAME }}_$f" 2>/dev/null || true
+              fi
+            fi
+          done
+          
+          echo "=== 计算文件 SHA256 ==="
+          sha256sum * > sha256sums.txt 2>/dev/null || true
+          cat sha256sums.txt
+          
+          ls -la
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ 固件整理完成"
+
+      - name: 上传固件到 Artifact
+        if: steps.organize.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${{ env.date1 }}
+          path: ${{ env.FIRMWARE }}
+
+      - name: 生成发布标签和感谢语
+        id: release
+        if: steps.organize.outcome == 'success' && env.UPLOAD_RELEASE == 'true'
+        run: |
+          CONFIG_CHANGE=$(git log -1 --pretty=format:"%s (%cd)" --date=short -- .config diy1.sh diy2.sh 2>/dev/null || echo "初始配置")
+          CACHE_STATUS="${{ steps.cache.outputs.cache-hit == 'true' && '✅ 命中' || '⚠️ 未命中' }}"
+          CCACHE_STATUS="${{ steps.cache-ccache.outputs.cache-hit == 'true' && '✅ 命中' || '⚠️ 未命中' }}"
+          
+          cd openwrt
+          ENABLED_APPS=$(grep -E "^CONFIG_PACKAGE_luci-app-[^=]+=y" .config | \
+            sed 's/CONFIG_PACKAGE_//;s/=y//' | \
+            grep -v "luci-app-passwall_" | \
+            sort -u | \
+            sed 's/^/- /')
+          if [ -z "$ENABLED_APPS" ]; then
+            ENABLED_APPS="- 无额外 LuCI 应用"
+          fi
+          cd ..
+          
+          FIRMWARE_FILES=$(ls -1 ${{ env.FIRMWARE }} 2>/dev/null | grep -E "\.(bin|img\.gz|vmdk|vdi|vhdx|qcow2)$" | head -10 | sed 's/^/- /' || echo "- 固件文件")
+          
+          cat > release.txt <<EOF
+          由衷感谢所有为 OpenWrt 无私奉献的大佬们
+          
+          ## 📥 固件信息
+          - **默认 IP**：192.168.5.1
+          - **默认密码**：无
+          - **默认主题**：Argon
+          - **默认语言**：简体中文
+          - **IPv6 支持**：✅ 已启用
+          - **编译日期**：${{ env.date3 }}
+          - **编译缓存**：$CACHE_STATUS ｜ **ccache**：$CCACHE_STATUS
+          
+          ## 🔧 本次配置变更
+          $CONFIG_CHANGE
+          
+          ## 📦 集成 LuCI 应用清单（自动提取）
+          $ENABLED_APPS
+          
+          ## 🔗 源码信息
+          - **OpenWrt 分支**：${{ env.REPO_BRANCH }}
+          - **设备型号**：${{ env.DEVICE_NAME }}
+          - **内核版本**：跟随官方最新
+          
+          ## 📁 固件文件 & 校验
+          $FIRMWARE_FILES
+          
+          **SHA256 校验文件**：[sha256sums.txt](./sha256sums.txt)
+          
+          ---
+          *由 GitHub Actions 自动构建 | $(date +'%Y-%m-%d %H:%M')*
+          EOF
+          
+          echo "✅ Release 描述生成完成"
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 创建正式 Release 并上传固件
+        if: steps.release.outcome == 'success'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.date1 }}
+          name: ${{ env.date3 }} 编译版本
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+          draft: false
+          prerelease: false
+
+      - name: 编译后深度清理
+        if: always()
+        run: |
+          echo "=== 最终磁盘空间 ==="
+          df -h
+          rm -rf openwrt/build_dir openwrt/staging_dir openwrt/tmp 2>/dev/null || true
+          echo "=== 清理后磁盘空间 ==="
+          df -h
+
+      - name: 发送 Telegram 通知
+        if: always() && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != ''
+        run: |
+          STATUS="${{ job.status }}"
+          if [ "$STATUS" == "success" ]; then
+            MESSAGE="✅ OpenWrt 编译成功！%0A版本：${{ env.date3 }}%0A设备：${{ env.DEVICE_NAME }}%0A下载：${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ env.date1 }}"
+          else
+            MESSAGE="❌ OpenWrt 编译失败！%0A查看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d chat_id="${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d text="$MESSAGE" \
+            -d parse_mode="HTML"
