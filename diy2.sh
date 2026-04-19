@@ -8,4 +8,4 @@
 rm -rf feeds/packages/lang/golang
 git clone https://github.com/sbwml/packages_lang_golang -b 26.x feeds/packages/lang/golang
 
-echo "✅ diy2.sh 执行完成（无额外操作）"
+echo "✅ diy2.sh 执行完成"
