@@ -102,6 +102,9 @@ jobs:
       # ============================================
       # 缓存步骤（动态键，兼容所有架构）
       # ============================================
+      - name: 获取源码 commit SHA（用于缓存键）
+        run: echo "COMMIT_SHA=$(git ls-remote $REPO_URL $REPO_BRANCH | cut -f1)" >> $GITHUB_ENV
+
       - name: 缓存 dl、staging_dir、build_dir
         id: cache
         uses: actions/cache@v5
@@ -110,9 +113,9 @@ jobs:
             openwrt/dl
             openwrt/staging_dir
             openwrt/build_dir
-          key: openwrt-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+          key: openwrt-${{ env.COMMIT_SHA }}-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh', 'feeds.conf.default') }}
           restore-keys: |
-            openwrt-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh') }}
+            openwrt-${{ env.COMMIT_SHA }}-
             openwrt-
 
       - name: 显示缓存状态
@@ -154,13 +157,13 @@ jobs:
           make -j$(nproc) || make -j1 || make -j1 V=s
           
           # 检查编译产物是否存在
-          if [ -d "bin/targets/x86/64" ] && [ -n "$(ls -A bin/targets/x86/64/*.bin 2>/dev/null)" ]; then
+          if [ -d "bin/targets/x86/64" ] && [ -n "$(ls -A bin/targets/x86/64/*.img.gz 2>/dev/null)" ]; then
             echo "✅ 固件编译成功"
-            ls -la bin/targets/x86/64/*.bin
+            ls -la bin/targets/x86/64/*.img.gz
           else
             echo "❌ 固件文件不存在，编译可能失败"
             echo "=== 检查 bin 目录内容 ==="
-            find bin -name "*.bin" 2>/dev/null || echo "未找到 .bin 文件"
+            find bin -name "*.img.gz" 2>/dev/null || echo "未找到 .img.gz 文件"
             exit 1
           fi
           
@@ -187,55 +190,49 @@ jobs:
           echo "=== openwrt/bin 目录大小 ==="
           du -sh openwrt/bin 2>/dev/null || true
 
-      - name: 整理固件文件
+      # ============================================
+      # 整理固件文件（物理机镜像 + 配置文件）
+      # ============================================
+      - name: 整理固件文件（物理机镜像 + 配置文件）
         id: organize
         if: steps.compile.outcome == 'success'
         run: |
           mkdir -p firmware
           
-          # 复制配置文件
-          cp -v ./openwrt/.config firmware/${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}.config
+          # 复制配置文件（重命名为 config.txt）
+          cp -v ./openwrt/.config firmware/config.txt
           
-          # 查找并复制固件文件
-          echo "=== 查找固件文件 ==="
-          find openwrt/bin/targets/*/*/ -maxdepth 1 -type f \
-            \( -name "config.buildinfo" \
-            -o -name "*squashfs-combined*" \
-            -o -name "*sysupgrade*" \
-            -o -name "*.bin" \
-            -o -name "*.img.gz" \
-            -o -name "*.vmdk" \
-            -o -name "*.vdi" \
-            -o -name "*.vhdx" \
-            -o -name "*.qcow2" \) \
-            -exec cp -v {} firmware/ \; 2>/dev/null || true
+          echo "=== 查找并重命名物理机固件文件 ==="
+          
+          # EFI 启动镜像
+          if [ -f "openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz" ]; then
+            cp -v openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz firmware/OpenWrt-UEFI.img.gz
+            echo "✅ 已复制: OpenWrt-UEFI.img.gz (UEFI 启动)"
+          else
+            echo "⚠️ 未找到 EFI 启动镜像"
+          fi
+          
+          # BIOS 启动镜像
+          if [ -f "openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz" ]; then
+            cp -v openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz firmware/OpenWrt-BIOS.img.gz
+            echo "✅ 已复制: OpenWrt-BIOS.img.gz (传统 BIOS 启动)"
+          else
+            echo "⚠️ 未找到 BIOS 启动镜像"
+          fi
           
           cd firmware
-          
-          # 重命名文件（添加日期和名称前缀）
-          echo "=== 重命名固件文件 ==="
-          for f in *; do
-            if [ -f "$f" ]; then
-              if [[ "$f" == "config.buildinfo" ]]; then
-                mv "$f" "${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_$f" 2>/dev/null || true
-              elif [[ "$f" == *"squashfs-combined"* ]] || [[ "$f" == *".bin" ]] || [[ "$f" == *".img.gz" ]]; then
-                mv "$f" "${{ env.date1 }}_${{ env.OPENWRT_NAME }}_$f" 2>/dev/null || true
-              fi
-            fi
-          done
-          
           echo "=== 固件目录内容 ==="
-          ls -la
+          ls -lh
           
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "✅ 固件整理完成"
+          echo "✅ 物理机固件整理完成"
 
       - name: 上传固件到 Artifact
         if: steps.organize.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: firmware_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${{ env.date1 }}
+          name: OpenWrt_Physical_${{ env.DEVICE_NAME }}_${{ env.date2 }}
           path: ${{ env.FIRMWARE }}
 
       - name: 生成发布标签和感谢语
@@ -248,16 +245,13 @@ jobs:
           # 获取缓存状态
           CACHE_STATUS="${{ steps.cache.outputs.cache-hit == 'true' && '✅ 命中（编译加速）' || '⚠️ 未命中（完整编译）' }}"
           
-          # 获取固件文件列表
-          FIRMWARE_FILES=$(ls -1 ${{ env.FIRMWARE }} 2>/dev/null | grep -E "\.(bin|img\.gz|vmdk|vdi|vhdx|qcow2)$" | head -10 | sed 's/^/- /' || echo "- 固件文件")
-          
           cat > release.txt <<EOF
           由衷感谢所有为 OpenWrt 无私奉献的大佬们
           
           ## 📥 固件信息
           - **默认 IP**：192.168.5.1
           - **默认密码**：无
-          - **默认主题**：Argon
+          - **默认主题**：Bootstrap（官方默认）
           - **默认语言**：简体中文
           - **IPv6 支持**：✅ 已启用
           - **编译日期**：${{ env.date3 }}
@@ -274,15 +268,19 @@ jobs:
           | 存储 | 磁盘管理、Samba4、硬盘休眠 |
           | 系统 | 关机按钮、内存释放、访问限制、文件传输 |
           | 服务 | Lucky、KMS服务器、TTYD终端 |
-          | 主题 | Argon（含配置界面）、Material |
+          | 主题 | Argon（可选，需手动切换）、Material |
           
           ## 🔗 源码信息
           - **OpenWrt 分支**：${{ env.REPO_BRANCH }}
           - **设备型号**：${{ env.DEVICE_NAME }}
           - **内核版本**：跟随官方最新
           
-          ## 📁 固件文件
-          $FIRMWARE_FILES
+          ## 📁 固件文件说明
+          - **OpenWrt-UEFI.img.gz**：适用于 UEFI 启动的物理机（解压后写入硬盘/U盘）
+          - **OpenWrt-BIOS.img.gz**：适用于传统 BIOS 启动的物理机（解压后写入硬盘/U盘）
+          - **config.txt**：本次编译的完整配置文件
+          
+          **使用方法**：解压对应 .img.gz 文件，使用 Rufus、balenaEtcher 或 dd 命令写入目标磁盘。
           
           ---
           *由 GitHub Actions 自动构建 | 编译耗时约 1.5-2.5 小时（缓存命中时约 30-60 分钟）*
