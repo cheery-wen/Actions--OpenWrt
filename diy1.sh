@@ -16,7 +16,7 @@ if [ -f "package/base-files/files/etc/shadow" ]; then
 fi
 
 # ---------- 3. 自定义版本显示 ----------
-sed -i "s/DISTRIB_REVISION='.*'/DISTRIB_REVISION='$(TZ=UTC-8 date "+%Y.%m.%d") compiled by cheery'/g" package/base-files/files/etc/openwrt_release
+sed -i "s/DISTRIB_REVISION='.*'/DISTRIB_REVISION='($(TZ=UTC-8 date "+%Y.%m.%d") compiled by cheery)'/g" package/base-files/files/etc/openwrt_release
 echo "✅ 版本信息已更新（compiled by cheery）"
 
 # ---------- 4. 删除有依赖问题的软件包 ----------
