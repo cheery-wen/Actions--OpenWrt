@@ -1,4 +1,4 @@
-name: 编译 OpenWrt (官方原版)
+name: 编译 OpenWrt (最终优化版)
 
 on:
   push:
@@ -7,18 +7,18 @@ on:
   workflow_dispatch:
 
 env:
-  REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: main
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
   CONFIG_FILE: .config
-  DIY1_SH: diy1.sh
-  DIY2_SH: diy2.sh
   FEEDS_CONF: feeds.conf.default
+  DIY1_SH: diy1.sh                 # 首次配置脚本（修改 feeds 源）
+  DIY2_SH: diy2.sh                 # 二次配置脚本（修改 .config）
   TZ: Asia/Shanghai
-  OPENWRT_NAME: "openwrt"
+  OPENWRT_NAME: "lede"
   UPLOAD_RELEASE: true
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # 强制使用 Node.js 24
 
 jobs:
   build:
@@ -28,33 +28,31 @@ jobs:
       contents: write
 
     steps:
+      # 1. 释放磁盘空间（删除无用工具）
       - name: 释放系统最大可用空间
         run: |
-          echo "=== 释放前磁盘空间 ==="
-          df -h
           sudo apt-get clean
-          docker system prune -af || true
+          docker system prune -af
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android \
             /usr/local/lib/node_modules /opt/hostedtoolcache /usr/local/.ghcup /usr/local/.cargo \
             /usr/local/lib/python3.* /usr/local/aws-sam-cli /usr/local/aws-cli /usr/local/julia* \
             /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/share/kotlinc /opt/microsoft \
-            /opt/google /var/lib/gems /opt/pipx /opt/amazon 2>/dev/null || true
-          echo "=== 释放后磁盘空间 ==="
+            /opt/google /var/lib/gems /opt/pipx /opt/amazon
           df -h
 
+      # 2. 检出本仓库（存放 .config、diy1.sh、diy2.sh 等）
       - name: 检出仓库代码
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
+      # 3. 设置时区与日期变量
       - name: 设置当前的日期
         run: |
           sudo timedatectl set-timezone "$TZ"
           echo "date1=$(date +'%Y.%m.%d-%H.%M')" >> $GITHUB_ENV
           echo "date2=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
           echo "date3=$(date '+%Y年%m月%d日')" >> $GITHUB_ENV
-          echo "✅ 日期设置完成"
 
+      # 4. 安装编译依赖（Ubuntu 24.04 无 python2.7）
       - name: 安装编译依赖
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -67,246 +65,140 @@ jobs:
             autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync
           df -h
 
+      # 5. 克隆 LEDE 源码
       - name: 克隆 OpenWrt 源码
-        run: |
-          git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-          echo "✅ 源码克隆完成"
+        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
 
-      - name: 执行 diy1.sh（首次自定义）
+      # 6. 首次自定义配置：替换 feeds.conf.default 并执行 diy1.sh
+      - name: 首次自定义配置（处理 feeds.conf.default 并执行 diy1.sh）
         run: |
           cd openwrt
           [ -f "../$FEEDS_CONF" ] && cp "../$FEEDS_CONF" ./
           [ -f "../$DIY1_SH" ] && chmod +x "../$DIY1_SH" && "../$DIY1_SH"
-          echo "✅ diy1.sh 执行完成"
 
+      # 7. 更新 feeds
       - name: 更新 feeds
         run: |
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          echo "✅ feeds 更新完成"
 
-      - name: 执行 diy2.sh（再次自定义）
-        run: |
-          cd openwrt
-          [ -f "../$DIY2_SH" ] && chmod +x "../$DIY2_SH" && "../$DIY2_SH"
-          echo "✅ diy2.sh 执行完成"
-
-      - name: 加载配置并执行 defconfig
-        run: |
-          [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
-          cd openwrt
-          make defconfig
-          echo "✅ defconfig 执行完成"
-
-      # ============================================
-      # 缓存步骤（动态键，兼容所有架构）
-      # ============================================
-      - name: 获取源码 commit SHA（用于缓存键）
-        run: echo "COMMIT_SHA=$(git ls-remote $REPO_URL $REPO_BRANCH | cut -f1)" >> $GITHUB_ENV
-
+      # 8. 缓存 dl、staging_dir、build_dir
       - name: 缓存 dl、staging_dir、build_dir
-        id: cache
         uses: actions/cache@v5
         with:
           path: |
             openwrt/dl
             openwrt/staging_dir
             openwrt/build_dir
-          key: openwrt-${{ env.COMMIT_SHA }}-${{ hashFiles('.config', 'diy1.sh', 'diy2.sh', 'feeds.conf.default') }}
-          restore-keys: |
-            openwrt-${{ env.COMMIT_SHA }}-
-            openwrt-
+          key: openwrt-${{ github.ref }}-${{ github.run_id }}
+          restore-keys: openwrt-${{ github.ref }}-
 
-      - name: 显示缓存状态
+      # 9. 再次加载自定义配置：复制 .config、执行 diy2.sh、生成默认配置
+      - name: 再次加载自定义配置（复制 .config，执行 diy2.sh，make defconfig）
         run: |
-          if [ "${{ steps.cache.outputs.cache-hit }}" == "true" ]; then
-            echo "✅ 缓存命中！编译将显著加速"
-          else
-            echo "⚠️ 缓存未命中，将进行完整编译"
-          fi
+          [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
+          cd openwrt
+          [ -f "../$DIY2_SH" ] && chmod +x "../$DIY2_SH" && "../$DIY2_SH"
+          make defconfig
 
-      - name: 下载源码包（增强重试）
+      # 10. 下载源码包（并行下载，失败后重试）
+      - name: 下载源码包
         run: |
           cd openwrt
-          echo "=== 开始下载源码包 ==="
-          make download -j8 V=s || make download -j4 V=s || make download -j1 V=s || make download -j1 V=s
-          echo "=== 检查空文件 ==="
+          make download -j8
           find dl -size -1024c -exec ls -l {} \;
-          echo "=== 删除空文件并重试 ==="
-          find dl -size -1024c -exec rm -f {} \;
-          make download -j1 V=s 2>/dev/null || true
-          echo "✅ 源码包下载完成"
+          make download -j8 || make download -j1 V=s
 
-      - name: 编译前检查与清理
-        run: |
-          cd openwrt
-          echo "=== 编译前磁盘空间 ==="
-          df -h .
-          echo "=== 清理临时文件 ==="
-          rm -rf tmp 2>/dev/null || true
-          rm -rf bin/packages 2>/dev/null || true
-          df -h .
-
+      # 11. 编译固件（自动降级重试，提取设备名）
       - name: 编译固件
         id: compile
         run: |
           cd openwrt
-          echo -e "=== 开始编译，使用 $(nproc) 线程 ==="
-          
+          echo -e "$(nproc) thread compile"
           make -j$(nproc) || make -j1 || make -j1 V=s
-          
-          # 检查编译产物是否存在
-          if [ -d "bin/targets/x86/64" ] && [ -n "$(ls -A bin/targets/x86/64/*.img.gz 2>/dev/null)" ]; then
-            echo "✅ 固件编译成功"
-            ls -la bin/targets/x86/64/*.img.gz
-          else
-            echo "❌ 固件文件不存在，编译可能失败"
-            echo "=== 检查 bin 目录内容 ==="
-            find bin -name "*.img.gz" 2>/dev/null || echo "未找到 .img.gz 文件"
-            exit 1
-          fi
-          
-          # 后期处理（容错）
-          make package/index V=s 2>/dev/null || echo "⚠️ package/index 失败，忽略"
-          make json_overview_image_info V=s 2>/dev/null || echo "⚠️ json_overview_image_info 失败，忽略"
-          make checksum V=s 2>/dev/null || echo "⚠️ checksum 失败，忽略"
-          
           echo "status=success" >> $GITHUB_OUTPUT
-          
-          # 提取设备名称
           grep '^CONFIG_TARGET_.*_DEVICE_.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=$(cat DEVICE_NAME)" >> $GITHUB_ENV
-          [ ! -s DEVICE_NAME ] && echo "DEVICE_NAME=generic" >> $GITHUB_ENV
-          echo "✅ 设备名称: $(cat DEVICE_NAME 2>/dev/null || echo generic)"
 
+      # 12. 检查磁盘使用情况（可选）
       - name: 检查磁盘使用情况
         if: (!cancelled())
-        run: |
-          echo "=== 编译后磁盘空间 ==="
-          df -h
-          echo "=== openwrt 目录大小 ==="
-          du -sh openwrt 2>/dev/null || true
-          echo "=== openwrt/bin 目录大小 ==="
-          du -sh openwrt/bin 2>/dev/null || true
+        run: df -hT
 
-      # ============================================
-      # 整理固件文件（物理机镜像 + 配置文件）
-      # ============================================
-      - name: 整理固件文件（物理机镜像 + 配置文件）
+      # 13. 上传 bin 目录（按需）
+      - name: 上传 bin 目录
+        if: steps.compile.outcome == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: bin_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${{ env.date1 }}
+          path: openwrt/bin
+
+      # 14. 整理固件到 firmware 目录（仅保留传统+EFI squashfs 固件，简化文件名）
+      - name: 整理固件文件
         id: organize
         if: steps.compile.outcome == 'success'
         run: |
           mkdir -p firmware
+          # 复制配置文件（作为记录）
+          cp -v ./openwrt/.config firmware/${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}.config
           
-          # 复制配置文件（重命名为 config.txt）
-          cp -v ./openwrt/.config firmware/config.txt
-          
-          echo "=== 查找并重命名物理机固件文件 ==="
-          
-          # EFI 启动镜像
-          if [ -f "openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz" ]; then
-            cp -v openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined-efi.img.gz firmware/OpenWrt-UEFI.img.gz
-            echo "✅ 已复制: OpenWrt-UEFI.img.gz (UEFI 启动)"
-          else
-            echo "⚠️ 未找到 EFI 启动镜像"
-          fi
-          
-          # BIOS 启动镜像
-          if [ -f "openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz" ]; then
-            cp -v openwrt/bin/targets/x86/64/openwrt-x86-64-generic-squashfs-combined.img.gz firmware/OpenWrt-BIOS.img.gz
-            echo "✅ 已复制: OpenWrt-BIOS.img.gz (传统 BIOS 启动)"
-          else
-            echo "⚠️ 未找到 BIOS 启动镜像"
-          fi
+          # 查找所有 squashfs-combined 固件（包括传统和 EFI）
+          find openwrt/bin/targets/*/*/ -maxdepth 1 -type f -name "*squashfs-combined*" | while read file; do
+            # 判断启动类型
+            if echo "$file" | grep -q "efi"; then
+              boot_type="efi"
+            else
+              boot_type="combined"
+            fi
+            # 保留原始扩展名（如 .img, .img.gz）
+            ext="${file##*.}"
+            # 新文件名：日期_项目名_设备名_启动类型.扩展名
+            new_name="${{ env.date1 }}_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${boot_type}.${ext}"
+            cp "$file" "firmware/$new_name"
+          done
           
           cd firmware
-          echo "=== 固件目录内容 ==="
-          ls -lh
-          
           echo "FIRMWARE=$PWD" >> $GITHUB_ENV
           echo "status=success" >> $GITHUB_OUTPUT
-          echo "✅ 物理机固件整理完成"
+          ls -lh
 
+      # 15. 上传固件到 Artifact
       - name: 上传固件到 Artifact
         if: steps.organize.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: OpenWrt_Physical_${{ env.DEVICE_NAME }}_${{ env.date2 }}
+          name: firmware_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${{ env.date1 }}
           path: ${{ env.FIRMWARE }}
 
+      # 16. 生成 Release 正文（感谢语）
       - name: 生成发布标签和感谢语
         id: release
         if: steps.organize.outcome == 'success' && env.UPLOAD_RELEASE == 'true'
         run: |
-          # 获取最近一次配置相关的提交信息
-          CONFIG_CHANGE=$(git log -1 --pretty=format:"%s (%cd)" --date=short -- .config diy1.sh diy2.sh 2>/dev/null || echo "初始配置")
-          
-          # 获取缓存状态
-          CACHE_STATUS="${{ steps.cache.outputs.cache-hit == 'true' && '✅ 命中（编译加速）' || '⚠️ 未命中（完整编译）' }}"
-          
           cat > release.txt <<EOF
           由衷感谢所有为 OpenWrt 无私奉献的大佬们
-          
-          ## 📥 固件信息
-          - **默认 IP**：192.168.5.1
-          - **默认密码**：无
-          - **默认主题**：Bootstrap（官方默认）
-          - **默认语言**：简体中文
-          - **IPv6 支持**：✅ 已启用
-          - **编译日期**：${{ env.date3 }}
-          - **缓存状态**：$CACHE_STATUS
-          
-          ## 🔧 本次配置变更
-          $CONFIG_CHANGE
-          
-          ## 📦 集成插件清单
-          | 类别 | 插件 |
-          |------|------|
-          | 代理 | PassWall（完整版） |
-          | 网络 | DDNS（Cloudflare）、ZeroTier、UDPXY |
-          | 存储 | 磁盘管理、Samba4、硬盘休眠 |
-          | 系统 | 关机按钮、内存释放、访问限制、文件传输 |
-          | 服务 | Lucky、KMS服务器、TTYD终端 |
-          | 主题 | Argon（可选，需手动切换）、Material |
-          
-          ## 🔗 源码信息
-          - **OpenWrt 分支**：${{ env.REPO_BRANCH }}
-          - **设备型号**：${{ env.DEVICE_NAME }}
-          - **内核版本**：跟随官方最新
-          
-          ## 📁 固件文件说明
-          - **OpenWrt-UEFI.img.gz**：适用于 UEFI 启动的物理机（解压后写入硬盘/U盘）
-          - **OpenWrt-BIOS.img.gz**：适用于传统 BIOS 启动的物理机（解压后写入硬盘/U盘）
-          - **config.txt**：本次编译的完整配置文件
-          
-          **使用方法**：解压对应 .img.gz 文件，使用 Rufus、balenaEtcher 或 dd 命令写入目标磁盘。
-          
-          ---
-          *由 GitHub Actions 自动构建 | 编译耗时约 1.5-2.5 小时（缓存命中时约 30-60 分钟）*
+          📥 固件下载
           EOF
-          
-          echo "✅ Release 描述生成完成"
           echo "status=success" >> $GITHUB_OUTPUT
 
+      # 17. 创建正式 Release 并上传固件
       - name: 创建正式 Release 并上传固件
         if: steps.release.outcome == 'success'
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.date1 }}
-          name: ${{ env.date3 }} 编译版本
+          tag_name: ${{ env.date2 }}
+          name: ${{ env.date3 }}
           body_path: release.txt
           files: ${{ env.FIRMWARE }}/*
           draft: false
           prerelease: false
 
+      # 18. 编译后深度清理（释放空间）
       - name: 编译后深度清理
         if: always()
         run: |
-          echo "=== 最终磁盘空间 ==="
-          df -h
-          rm -rf openwrt/build_dir openwrt/staging_dir openwrt/tmp 2>/dev/null || true
-          echo "=== 清理后磁盘空间 ==="
+          rm -rf openwrt/build_dir openwrt/bin openwrt/staging_dir openwrt/tmp
           df -h
