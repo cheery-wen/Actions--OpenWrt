@@ -1,45 +1,71 @@
 #!/bin/bash
-# ============================================
-# DIY 脚本 1 - 在更新 feeds 前执行
-# 功能：修改源码配置、添加第三方插件、创建 UCI 默认设置
-# ============================================
+set -e
 
-# ---------- 1. 修改默认 IP 地址为 192.168.5.1 ----------
+echo "========================================="
+echo "OpenWrt 官方版 DIY 脚本 1"
+echo "========================================="
+
+# ---------- 1. 修改默认 IP ----------
 sed -i 's/192.168.1.1/192.168.5.1/g' package/base-files/files/bin/config_generate
+echo "✅ IP 已修改为 192.168.5.1"
 
-# ---------- 2. 清除登录密码（设置为空）----------
+# ---------- 2. 清除登录密码 ----------
 if [ -f "package/base-files/files/etc/shadow" ]; then
-    sed -i 's/^root:[^:]*:/root::/' package/base-files/files/etc/shadow
+    sed -i 's/root:[^:]*:/root::/g' package/base-files/files/etc/shadow
+    echo "✅ 密码已清除"
 fi
 
-# ---------- 3. 自定义固件版本显示 ----------
+# ---------- 3. 自定义版本显示 ----------
 sed -i "s/DISTRIB_REVISION='.*'/DISTRIB_REVISION='$(TZ=UTC-8 date "+%Y.%m.%d") compiled by cheery'/g" package/base-files/files/etc/openwrt_release
+echo "✅ 版本信息已更新（compiled by cheery）"
 
-# ---------- 4. 删除有依赖问题的软件包（消除警告）----------
+# ---------- 4. 删除有依赖问题的软件包 ----------
 rm -rf feeds/packages/net/onionshare-cli 2>/dev/null || true
+echo "✅ 问题包已删除"
 
-# ---------- 5. 添加第三方插件 ----------
-# Argon 主题与配置（仅安装，不设为默认）
+# ---------- 5. 删除 geoview（解决 Go 依赖编译失败）----------
+rm -rf package/openwrt-passwall-packages/geoview 2>/dev/null || true
+rm -rf feeds/packages/net/geoview 2>/dev/null || true
+echo "✅ 已删除 geoview"
+
+# ---------- 6. 删除可能冲突的自带插件 ----------
+echo "🗑️ 删除可能冲突的自带插件..."
+rm -rf feeds/luci/themes/luci-theme-argon 2>/dev/null || true
+rm -rf package/feeds/luci/luci-theme-argon 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-argon-config 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-passwall 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-lucky 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-poweroff 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-ramfree 2>/dev/null || true
+rm -rf feeds/luci/applications/luci-app-control-webrestriction 2>/dev/null || true
+rm -rf feeds/packages/net/lucky 2>/dev/null || true
+rm -rf package/feeds/packages/lucky 2>/dev/null || true
+echo "✅ 自带插件清理完成"
+
+# ---------- 7. 添加第三方插件 ----------
+echo "📦 添加第三方插件..."
+
 git clone --depth 1 https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon
 git clone --depth 1 https://github.com/jerrykuku/luci-app-argon-config.git package/luci-app-argon-config
+echo "✅ Argon 主题及配置已添加"
 
-# Lienol 仓库中的特定插件 (control-webrestriction 和 ramfree)
 git clone --depth 1 --filter=blob:none --sparse https://github.com/Lienol/openwrt-package.git package/lienol-packages
 cd package/lienol-packages
 git sparse-checkout set luci-app-control-webrestriction luci-app-ramfree
 cd ../..
+echo "✅ 访问限制、内存释放已添加"
 
-# 关机按钮
 git clone --depth 1 https://github.com/esirplayground/luci-app-poweroff.git package/luci-app-poweroff
+echo "✅ 关机按钮已添加"
 
-# Lucky 大吉
 git clone --depth 1 https://github.com/gdy666/luci-app-lucky.git package/luci-app-lucky
+echo "✅ Lucky 已添加"
 
-# PassWall 依赖包及主程序
 git clone --depth 1 https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git package/openwrt-passwall-packages
 git clone --depth 1 https://github.com/Openwrt-Passwall/openwrt-passwall.git package/luci-app-passwall
+echo "✅ PassWall 已添加"
 
-# ---------- 6. 创建首次启动 UCI 默认设置脚本（仅设置语言和 IP 二次保障，不设置主题）----------
+# ---------- 8. 创建首次启动 UCI 默认设置脚本 ----------
 mkdir -p files/etc/uci-defaults
 cat > files/etc/uci-defaults/99-custom-settings << 'EOF'
 #!/bin/sh
@@ -52,5 +78,8 @@ uci commit network
 exit 0
 EOF
 chmod +x files/etc/uci-defaults/99-custom-settings
+echo "✅ UCI 默认设置脚本已创建"
 
-echo "✅ diy1.sh 执行完成（主题保持官方默认 Bootstrap）"
+echo "========================================="
+echo "✅ OpenWrt diy1.sh 执行完成"
+echo "========================================="
