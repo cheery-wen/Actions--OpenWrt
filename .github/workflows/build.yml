@@ -62,12 +62,7 @@ jobs:
       - name: 克隆官方 OpenWrt 源码
         run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
 
-      # ======================
-      # 【新增：FEEDS_CONF 变量正式执行生效】
-      # 1.根目录feeds.conf.default 覆盖源码内
-      # 2.生成真正生效的 feeds.conf
-      # 3.再执行diy1（你原来逻辑不变）
-      # ======================
+      
       - name: 首次自定义配置 + 载入根目录FEEDS
         run: |
           cd openwrt
