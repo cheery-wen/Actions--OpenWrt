@@ -33,13 +33,17 @@ jobs:
       - name: 克隆 OpenWrt 25.12
         run: git clone --depth 1 -b ${{ env.REPO_BRANCH }} ${{ env.REPO_URL }} openwrt
 
+      # 关键：提前创建dl目录，彻底消除缓存路径不存在警告
+      - name: 预先创建缓存目录
+        run: mkdir -p openwrt/dl
+
       - name: 执行 diy1 插件与配置
         run: |
           cd openwrt
           [ -f ../feeds.conf.default ] && cp -f ../feeds.conf.default feeds.conf
           chmod +x ../diy1.sh && ../diy1.sh
 
-      - name: 复制配置 & 执行 diy2（路径100%正确）
+      - name: 复制配置 & 执行 diy2
         run: |
           cp -f .config openwrt/.config
           cd openwrt
@@ -91,7 +95,7 @@ jobs:
         with:
           tag_name: ${{ env.DATE1 }}-${{ env.RUN_NUM }}
           name: OpenWrt25.12 终极定稿版
-          body: "编译时间：${{ env.DATE1 }}\n✅ 全套官方主题+Argon\n✅ Cachev5｜路径彻底修复｜依赖零报错\n✅ Feeds预检｜Go稳定｜Passwall无冲突｜全自动无交互"
+          body: "编译时间：${{ env.DATE1 }}\n✅ 全套官方主题+Argon\n✅ Cachev5无警告｜路径完美｜依赖零报错\n✅ Feeds预检｜Go稳定｜Passwall无冲突｜全自动无交互"
           files: firmware/*
 
       - name: 编译后清理
