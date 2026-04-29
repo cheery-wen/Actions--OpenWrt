@@ -24,9 +24,6 @@ WORKDIR=$(pwd)
 OPENWRT_DIR="${WORKDIR}/openwrt"
 mkdir -p "${OPENWRT_DIR}"
 
-# 修改默认后台IP 192.168.1.1 → 192.168.5.1
-sed -i 's/192.168.1.1/192.168.5.1/g' package/base-files/files/bin/config_generate
-
 # 清空root密码
 sed -i '/^root:/d' package/base-files/files/etc/shadow
 echo "root::0:0:99999:7:::" >> package/base-files/files/etc/shadow
@@ -48,11 +45,11 @@ git_clone https://github.com/gdy666/luci-app-lucky package/luci-app-lucky
 git_clone https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/openwrt-passwall-packages
 git_clone https://github.com/Openwrt-Passwall/openwrt-passwall package/luci-app-passwall
 
-# 强制删除内置旧版Passwall，从根源杜绝冲突
-rm -rf "${OPENWRT_DIR}/feeds/luci/applications/luci-app-passwall"
-rm -rf "${OPENWRT_DIR}/feeds/packages/net/passwall"
+# 强制删除内置旧版Passwall
+rm -rf "${WORKDIR}/feeds/luci/applications/luci-app-passwall"
+rm -rf "${WORKDIR}/feeds/packages/net/passwall"
 
-# 绝对路径生成自定义配置，永不失效
+# 时区+默认中文语言
 mkdir -p "${WORKDIR}/files/etc/uci-defaults"
 cat > "${WORKDIR}/files/etc/uci-defaults/99-custom" <<'EOF'
 #!/bin/sh
@@ -60,10 +57,8 @@ cat > "${WORKDIR}/files/etc/uci-defaults/99-custom" <<'EOF'
 uci set system.@system[0].timezone='CST-8'
 uci set system.@system[0].zonename='Asia/Shanghai'
 uci set luci.main.lang=zh_cn
-uci set network.lan.ipaddr=192.168.5.1
 uci commit system
 uci commit luci
-uci commit network
 exit 0
 EOF
 chmod +x "${WORKDIR}/files/etc/uci-defaults/99-custom"
