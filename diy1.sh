@@ -3,17 +3,28 @@ set -e
 set -o pipefail
 export TZ=Asia/Shanghai
 
-# 全局Git优化+三次重试，彻底解决GitHub网络波动、限速拉取失败
+# Git全局网络优化
 git config --global http.postBuffer 524288000
 git config --global core.compression 0
-git config --global http.lowSpeedLimit 0
-git config --global http.lowSpeedTime 999999
 
+# 原生3次重试克隆函数，无无效参数、全网稳定
 git_clone() {
-    git clone --depth 1 --retry 3 "$1" "$2"
+    for i in {1..3}; do
+        if git clone --depth 1 "$1" "$2"; then
+            return 0
+        fi
+        echo "克隆失败，正在重试 $i/3"
+        sleep 5
+    done
+    exit 1
 }
 
-# 修改默认LAN网关
+# 全局绝对路径，本地/GitHub CI 100%通用
+WORKDIR=$(pwd)
+OPENWRT_DIR="${WORKDIR}/openwrt"
+mkdir -p "${OPENWRT_DIR}"
+
+# 修改默认后台IP 192.168.1.1 → 192.168.5.1
 sed -i 's/192.168.1.1/192.168.5.1/g' package/base-files/files/bin/config_generate
 
 # 清空root密码
@@ -25,21 +36,25 @@ build_date=$(TZ=Asia/Shanghai date +%Y.%m.%d)
 sed -i "s/DISTRIB_REVISION='.*'/DISTRIB_REVISION='($build_date compiled by cheery)'/" package/base-files/files/etc/openwrt_release
 sed -i "s/OpenWrt /OpenWrt ($build_date compiled by cheery) /" package/base-files/files/etc/banner
 
-# 克隆Argon主题
+# 拉取主题
 git_clone https://github.com/jerrykuku/luci-theme-argon package/luci-theme-argon
 git_clone https://github.com/jerrykuku/luci-app-argon-config package/luci-app-argon-config
 
-# Lucky 路径规范化
+# 拉取Lucky前后端
 git_clone https://github.com/gdy666/lucky package/lucky
 git_clone https://github.com/gdy666/luci-app-lucky package/luci-app-lucky
 
-# Passwall 双重保险拉取，无依赖冲突
+# 拉取Passwall全套
 git_clone https://github.com/Openwrt-Passwall/openwrt-passwall-packages package/openwrt-passwall-packages
 git_clone https://github.com/Openwrt-Passwall/openwrt-passwall package/luci-app-passwall
 
-# uci-defaults 文件名统一 100%生效
-mkdir -p files/etc/uci-defaults
-cat > files/etc/uci-defaults/99-custom <<'EOF'
+# 强制删除内置旧版Passwall，从根源杜绝冲突
+rm -rf "${OPENWRT_DIR}/feeds/luci/applications/luci-app-passwall"
+rm -rf "${OPENWRT_DIR}/feeds/packages/net/passwall"
+
+# 绝对路径生成自定义配置，永不失效
+mkdir -p "${WORKDIR}/files/etc/uci-defaults"
+cat > "${WORKDIR}/files/etc/uci-defaults/99-custom" <<'EOF'
 #!/bin/sh
 [ -f /lib/functions.sh ] && . /lib/functions.sh
 uci set system.@system[0].timezone='CST-8'
@@ -51,6 +66,9 @@ uci commit luci
 uci commit network
 exit 0
 EOF
-chmod +x files/etc/uci-defaults/99-custom
+chmod +x "${WORKDIR}/files/etc/uci-defaults/99-custom"
+
+# 强制移入openwrt源码目录
+cp -rf "${WORKDIR}/files" "${OPENWRT_DIR}/"
 
 exit 0
