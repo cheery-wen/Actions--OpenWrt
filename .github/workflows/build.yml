@@ -91,7 +91,7 @@ jobs:
         with:
           tag_name: ${{ env.DATE1 }}-${{ env.RUN_NUM }}
           name: OpenWrt25.12 终极定稿版
-          body: "编译时间：${{ env.DATE1 }}\n✅ Cachev5｜路径彻底修复｜依赖零报错｜Feeds预检｜Go稳定｜Passwall无冲突｜全自动无交互"
+          body: "编译时间：${{ env.DATE1 }}\n✅ 全套官方主题+Argon\n✅ Cachev5｜路径彻底修复｜依赖零报错\n✅ Feeds预检｜Go稳定｜Passwall无冲突｜全自动无交互"
           files: firmware/*
 
       - name: 编译后清理
