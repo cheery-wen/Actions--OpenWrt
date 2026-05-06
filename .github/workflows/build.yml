@@ -1,165 +1,198 @@
-name: OpenWrt 25.12 全自动最终无错版
+name: 编译官方 OpenWrt (最终优化版)
 
 on:
+  push:
+    branches: [ master ]
+  repository_dispatch:
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
-  REPO_BRANCH: openwrt-25.12
+  REPO_BRANCH: openwrt-25.12          # 请确认版本是否存在，可改为 openwrt-24.10 或 openwrt-23.05
+  CONFIG_FILE: .config
+  FEEDS_CONF: feeds.conf.default
+  DIY1_SH: diy1.sh
+  DIY2_SH: diy2.sh
   TZ: Asia/Shanghai
+  OPENWRT_NAME: "openwrt"
+  UPLOAD_RELEASE: true
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  CCACHE_DIR: ~/.ccache
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   build:
+    name: 编译任务
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
 
     steps:
-      - name: 清理环境 & 安装完整依赖
+      - name: 释放系统最大可用空间
         run: |
           sudo apt-get clean
-          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/pipx
-          sudo apt-get -qq update
-          sudo apt-get -qq install -y build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev unzip zlib1g-dev libc6-dev-i386 flex uglifyjs gcc-multilib p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib gperf wget curl swig rsync cpio perl file bc patch mold python3 iproute2
+          docker system prune -af || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android \
+            /usr/local/lib/node_modules /opt/hostedtoolcache /usr/local/.ghcup /usr/local/.cargo \
+            /usr/local/lib/python3.* /usr/local/aws-sam-cli /usr/local/aws-cli /usr/local/julia* \
+            /usr/share/swift /usr/share/miniconda /usr/share/az* /usr/share/kotlinc /opt/microsoft \
+            /opt/google /var/lib/gems /opt/pipx /opt/amazon || true
           df -h
 
-      - name: 拉取仓库文件
+      - name: 检出仓库代码
         uses: actions/checkout@v5
 
-      - name: 生成日期
+      - name: 设置当前的日期
         run: |
-          echo "DATE1=$(TZ=Asia/Shanghai date +'%Y.%m.%d-%H.%M')" >> $GITHUB_ENV
-          echo "RUN_NUM=${{ github.run_number }}" >> $GITHUB_ENV
+          sudo timedatectl set-timezone "$TZ"
+          echo "date1=$(date +'%Y.%m.%d-%H.%M')" >> $GITHUB_ENV
+          echo "date2=$(date +'%Y.%m.%d')" >> $GITHUB_ENV
+          echo "date3=$(date '+%Y年%m月%d日')" >> $GITHUB_ENV
 
-      - name: 克隆OpenWrt 25.12源码
-        run: git clone --depth 1 -b ${{ env.REPO_BRANCH }} ${{ env.REPO_URL }} openwrt
-
-      - name: DL目录防炸
-        run: mkdir -p openwrt/dl
-
-      # ====================== 🔥 网络增强（关键升级） ======================
-      - name: 强化网络配置（防止进不去后台）
+      - name: 安装编译依赖
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          mkdir -p openwrt/files/etc/config
+          sudo -E apt-get -qq update
+          sudo -E apt-get -qq install build-essential asciidoc binutils bzip2 gawk gettext git \
+            libncurses5-dev libz-dev patch python3 unzip zlib1g-dev lib32gcc-s1 libc6-dev-i386 \
+            subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev \
+            texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool \
+            autopoint device-tree-compiler g++-multilib antlr3 gperf wget curl swig rsync ccache
+          df -h
 
-          cat > openwrt/files/etc/config/network << EOF
-          config device
-              option name 'br-lan'
-              option type 'bridge'
-              list ports 'eth0'
+      - name: 克隆 OpenWrt 源码
+        run: git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
 
-          config interface 'lan'
-              option device 'br-lan'
-              option proto 'static'
-              option ipaddr '192.168.5.1'
-              option netmask '255.255.255.0'
-              option ip6assign '60'
-
-          config interface 'wan'
-              option device 'eth1'
-              option proto 'dhcp'
-
-          config interface 'wan6'
-              option device 'eth1'
-              option proto 'dhcpv6'
-          EOF
-
-          # 🔥 fallback 防止完全断网（关键增强）
-          cat > openwrt/files/etc/uci-defaults/99-fallback-ip << EOF
-          uci set network.lan.ipaddr='192.168.5.1'
-          uci commit network
-          /etc/init.d/network restart
-          exit 0
-          EOF
-
-      - name: 防火墙安全配置
-        run: |
-          cat > openwrt/files/etc/config/firewall << EOF
-          config zone
-              option name 'lan'
-              option network 'lan'
-              option input 'ACCEPT'
-              option output 'ACCEPT'
-              option forward 'ACCEPT'
-
-          config zone
-              option name 'wan'
-              option network 'wan wan6'
-              option input 'REJECT'
-              option output 'ACCEPT'
-              option forward 'REJECT'
-
-          config forwarding
-              option src 'lan'
-              option dest 'wan'
-          EOF
-
-      # ====================== DIY ======================
-      - name: 执行diy1.sh（含Passwall）
+      - name: 首次自定义配置（处理 feeds.conf.default 并执行 diy1.sh）
         run: |
           cd openwrt
-          cp -f ../feeds.conf.default feeds.conf.default || true
-          chmod +x ../diy1.sh
-          ../diy1.sh
+          [ -f "../$FEEDS_CONF" ] && cp "../$FEEDS_CONF" ./
+          [ -f "../$DIY1_SH" ] && chmod +x "../$DIY1_SH" && "../$DIY1_SH"
 
-      - name: 写入.config + diy2
+      - name: 更新 feeds
         run: |
           cd openwrt
-          cp -f ../.config .config
-          chmod +x ../diy2.sh
-          ../diy2.sh
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-      # ====================== 下载缓存 ======================
-      - name: DL缓存
+      - name: 缓存 dl 目录
         uses: actions/cache@v5
         with:
           path: openwrt/dl
-          key: openwrt-dl-${{ github.ref }}-${{ hashFiles('openwrt/.config','openwrt/feeds.conf.default') }}
+          key: dl-${{ github.ref }}
+          restore-keys: |
+            dl-${{ github.ref }}-
+            dl-
 
-      - name: 下载依赖
-        run: |
-          cd openwrt
-          make download -j8 || make download -j1 V=s
-
-      # ====================== 编译 ======================
-      - name: 编译固件（稳定模式）
-        run: |
-          cd openwrt
-          make -j$(nproc) V=s || make -j1 V=s
-
-      # ====================== 日志 ======================
-      - name: 上传日志
-        uses: actions/upload-artifact@v5
+      - name: 缓存 ccache
+        uses: actions/cache@v5
         with:
-          name: Build-Log-${{ env.DATE1 }}
-          path: openwrt/build.log
+          path: ~/.ccache
+          key: ccache-${{ github.ref }}
+          restore-keys: ccache-
 
-      # ====================== 固件 ======================
-      - name: 整理固件
+      - name: 再次加载自定义配置（复制 .config，执行 diy2.sh，make defconfig）
+        run: |
+          [ -e "$CONFIG_FILE" ] && cp "$CONFIG_FILE" openwrt/.config
+          cd openwrt
+          [ -f "../$DIY2_SH" ] && chmod +x "../$DIY2_SH" && "../$DIY2_SH"
+          make defconfig
+
+      - name: 下载源码包
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          find dl -size -1024c -exec ls -l {} \; -exec rm -f {} \;
+          make download -j$(nproc) || make download -j1 V=s
+
+      - name: 编译固件
+        id: compile
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          cd openwrt
+          echo -e "$(nproc) thread compile"
+          make -j$(nproc) || make -j1 || make -j1 V=s
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 检查磁盘使用情况
+        if: (!cancelled())
+        run: df -hT
+
+      - name: 上传 bin 目录
+        if: steps.compile.outcome == 'success' && env.UPLOAD_BIN_DIR == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: bin_${{ env.OPENWRT_NAME }}_${{ env.date1 }}
+          path: openwrt/bin
+
+      - name: 整理固件文件（提取设备名并复制固件）
+        id: organize
+        if: steps.compile.outcome == 'success'
         run: |
           mkdir -p firmware
-          cp openwrt/bin/targets/x86/64/*combined* firmware/ || true
+          first_file=$(find openwrt/bin/targets -type f \( -name "*sysupgrade*" -o -name "*factory*" -o -name "*combined*" \) | head -1)
+          if [ -z "$first_file" ]; then
+            echo "ERROR: No firmware found (sysupgrade/factory/combined)!"
+            exit 1
+          fi
+          target_dir=$(dirname "$first_file")
+          parent=$(basename "$(dirname "$target_dir")")
+          child=$(basename "$target_dir")
+          device="${parent}_${child}"
+          device=$(echo "$device" | sed 's/[^a-zA-Z0-9._-]/_/g')
+          echo "DEVICE_NAME=$device" >> $GITHUB_ENV
 
-      - name: 上传固件
-        uses: actions/upload-artifact@v5
+          cp -v ./openwrt/.config "firmware/${date1}_${OPENWRT_NAME}_${device}.config"
+
+          find openwrt/bin/targets -type f \( -name "*sysupgrade*" -o -name "*factory*" -o -name "*combined*" \) | while read file; do
+            base=$(basename "$file")
+            cp "$file" "firmware/${date1}_${OPENWRT_NAME}_${device}_${base}"
+          done
+
+          if [ -z "$(ls -A firmware)" ]; then
+            echo "ERROR: No firmware files were copied!"
+            exit 1
+          fi
+
+          cd firmware
+          echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+          echo "status=success" >> $GITHUB_OUTPUT
+          ls -lh
+
+      - name: 上传固件到 Artifact
+        if: steps.organize.outcome == 'success' && env.UPLOAD_FIRMWARE == 'true'
+        uses: actions/upload-artifact@v6
         with:
-          name: OpenWrt-Firmware-${{ env.DATE1 }}
-          path: firmware/
+          name: firmware_${{ env.OPENWRT_NAME }}_${{ env.DEVICE_NAME }}_${{ env.date1 }}
+          path: ${{ env.FIRMWARE }}
 
-      # ====================== Release ======================
-      - name: 发布
+      - name: 生成发布标签和感谢语
+        id: release
+        if: steps.organize.outcome == 'success' && env.UPLOAD_RELEASE == 'true'
+        run: |
+          cat > release.txt <<EOF
+          由衷感谢所有为 OpenWrt 无私奉献的大佬们
+          📥 固件下载
+          EOF
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: 创建正式 Release 并上传固件
+        if: steps.release.outcome == 'success'
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ env.DATE1 }}-${{ github.run_number }}
-          name: OpenWrt25.12 稳定增强版
-          body: |
-            LAN: 192.168.5.1（已加fallback防炸）
-            WAN: DHCP
-            Passwall / Argon / Lucky / Samba4
-            ✔ 防止无法进入后台优化
-          files: firmware/*
+          tag_name: ${{ env.date1 }}-${{ github.run_number }}
+          name: ${{ env.date3 }}
+          body_path: release.txt
+          files: ${{ env.FIRMWARE }}/*
+          draft: false
+          prerelease: false
 
-      - name: 清理
+      - name: 编译后深度清理
         if: always()
-        run: rm -rf openwrt firmware
+        run: |
+          rm -rf openwrt/build_dir openwrt/bin openwrt/staging_dir openwrt/tmp
+          df -h
